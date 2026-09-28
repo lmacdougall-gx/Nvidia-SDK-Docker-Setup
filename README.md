@@ -22,32 +22,41 @@ Pick the image by the JetPack version you want to flash. Each JetPack release on
 | Device                                 | JetPack       | Host Ubuntu supported | Alias to use          |
 | -------------------------------------- | ------------- | --------------------- | --------------------- |
 | Jetson AGX Thor                        | 7.x (L4T 38)  | 24.04                 | `thor`, `jp7`         |
+| Jetson AGX Orin, Orin NX, Orin Nano    | 7.2+          | 22.04 (offered in the 22.04 image) | `orin`   |
 | Jetson AGX Orin, Orin NX, Orin Nano    | 6.x (L4T 36)  | 22.04, 20.04          | `orin`, `jp6`         |
 | Jetson AGX Orin, Orin NX, Orin Nano, AGX Xavier, Xavier NX | 5.x (L4T 35) | 20.04, 18.04 | `xavier`, `jp5` |
 | Jetson Nano, TX1, TX2, TX2 NX, AGX Xavier, Xavier NX | 4.x (L4T 32) | 18.04, 16.04 | `nano`, `tx1`, `tx2`, `jp4` |
 
-The alias always picks the newest Ubuntu in that row. For other products (DRIVE, Holoscan/IGX, etc.) check the host OS column in NVIDIA's [SDK Manager system requirements](https://docs.nvidia.com/sdk-manager/system-requirements/index.html) and pass the Ubuntu version directly (e.g. `22.04`). You can always pass a version number instead of an alias.
+The alias always picks the newest Ubuntu in that row. SDK Manager lists the JetPack versions each image supports for your board, so if the one you want isn't offered, try the next Ubuntu version. Which JetPack 7 release first added Orin support hasn't been verified here; JetPack 7.2.1 was offered for an Orin Nano in the 22.04 image. For other products (DRIVE, Holoscan/IGX, etc.) check the host OS column in NVIDIA's [SDK Manager system requirements](https://docs.nvidia.com/sdk-manager/system-requirements/index.html) and pass the Ubuntu version directly (e.g. `22.04`). You can always pass a version number instead of an alias.
 
 ## Repository layout
 
 ```
 images/           SDK Manager docker image tarballs from NVIDIA
+docker/           Turns NVIDIA's image into the local image (flash prerequisites baked in)
+host/             udev rules that `sdkm.sh host-setup` installs on a Linux host
 sdkm.sh           Launcher for Linux hosts and WSL2 (bash)
 sdkm.ps1          Launcher for Windows with Docker Desktop (PowerShell)
 usb-attach.ps1    Windows only: forwards the Jetson's USB connection into WSL2
-.gitattributes    Keeps sdkm.sh LF-only and stores images/ with Git LFS
+.gitattributes    Keeps shell scripts LF-only and stores images/ with Git LFS
 ```
 
 Both launchers take the same commands:
 
 | Command                     | What it does                                                          |
 | --------------------------- | --------------------------------------------------------------------- |
-| `list`                      | Show which images exist in `images/` and which are loaded into docker |
+| `list`                      | Show which images exist in `images/`, which are loaded, and which are built |
 | `load <target\|all>`        | `docker load` the matching tarball(s). Done automatically on first run |
+| `build <target\|all>`       | Build the local image (see [Local image](#local-image)). Done automatically when needed |
 | `gui <target>`              | Launch the SDK Manager GUI. `sdkm orin` is shorthand for `sdkm gui orin` |
 | `cli <target> -- <args>`    | Run SDK Manager's CLI, e.g. `-- --cli` or `-- --query non-interactive` |
 | `shell <target>`            | Open bash inside the container (user `nvidia`, password `nvidia`, passwordless sudo) |
+| `logs <target> [lines]`     | Show the end of SDK Manager's log, from the running container or the saved volume |
+| `doctor <target>`           | Pass/fail check of the host, the image, the flash tools and the USB connection |
+| `host-setup`                | `sdkm.sh` only: one-time Linux host setup for flashing (see below), uses `sudo` |
 | `reset <target>`            | Delete that image's saved home volume (login, downloads, installed SDKs) |
+
+Set `SDKM_NO_BUILD=1` to skip the local image and run NVIDIA's image as-is (e.g. offline). Flashing will then fail after the first launch, as described under [Local image](#local-image).
 
 `<target>` is an Ubuntu version (`18.04`, `20.04`, `22.04`, `24.04`) or an alias from the table above.
 
@@ -58,12 +67,19 @@ Requirements: an x86_64 Linux machine with a desktop session (X11 or Wayland wit
 ```bash
 sudo apt install docker.io x11-xserver-utils   # or install Docker Engine from docs.docker.com
 sudo usermod -aG docker $USER                   # then log out and back in
-sudo apt install qemu-user-static binfmt-support  # arm64 emulation, see below
 ```
+
+Then, once per machine, run the host setup from the repo:
+
+```bash
+./sdkm.sh host-setup
+```
+
+It needs `sudo` and does three things, each explained below: sets up arm64 emulation, loads the `nfsd` kernel module (also at every boot), and installs NVIDIA's flash-time udev rules. `sdkm.sh` checks all three every time it starts and warns if one is missing. `./sdkm.sh doctor <target>` shows the full pass/fail list.
 
 **arm64 emulation:** while building the Jetson's root filesystem, SDK Manager `chroot`s into it and runs arm64 programs such as `dpkg`. The host kernel must be able to run them through QEMU, and the registration needs the `F` flag so it works inside the container. `cat /proc/sys/fs/binfmt_misc/qemu-aarch64` should show `enabled` and `F` in its `flags:` line. If it doesn't, run `sudo systemctl restart systemd-binfmt`. Without this, the "File System and OS" step fails with `chroot: failed to run command 'dpkg': Exec format error`. `sdkm.sh` warns at startup if it's missing.
 
-**NFS server module (JetPack 6 and 7):** these releases flash by booting the Jetson from a temporary image that loads its files over NFS. The NFS server runs inside the container, but it uses the host kernel's `nfsd` module, so load it on the host:
+**NFS server module (JetPack 6 and 7):** these releases flash by booting the Jetson from a temporary image that loads its files over NFS. The NFS server runs inside the container, but it uses the host kernel's `nfsd` module. `host-setup` loads it; to do it by hand:
 
 ```bash
 sudo modprobe nfsd                                   # if "not found": sudo apt install linux-modules-extra-$(uname -r)
@@ -71,15 +87,17 @@ echo nfsd | sudo tee /etc/modules-load.d/nfsd.conf   # load it at every boot
 grep nfsd /proc/filesystems                          # should print "nodev nfsd"
 ```
 
-You don't need to run an NFS server on the host. If `nfs-kernel-server` is running on the host for something else, stop it while flashing (`sudo systemctl stop nfs-kernel-server`), since it conflicts with the container's server. Without `nfsd`, the flash fails with `no support in current kernel`. `sdkm.sh` warns about both at startup. If you load the module while SDK Manager is open, close it and start it again.
+You don't need to run an NFS server on the host. If `nfs-kernel-server` is running on the host for something else, stop it while flashing (`sudo systemctl stop nfs-kernel-server`), since it conflicts with the container's server. Without `nfsd`, the flash fails with `no support in current kernel`. If you load the module while SDK Manager is open, close it and start it again.
 
-Then from the repo:
+**udev rules:** during the flash, the Jetson reappears as USB device `0955:7035` with a network interface and its storage. NVIDIA's flash script installs two udev rules (`tools/kernel_flash/host_udev`). One tells NetworkManager not to reconfigure that interface; the other stops the desktop from automounting the board's storage. Inside a container those rules never reach the host's udev, so without them NetworkManager can take over the link and the flash "detects the board but can't connect". `host-setup` copies the same two rules from `host/` into `/etc/udev/rules.d/`.
+
+Then launch:
 
 ```bash
-chmod +x sdkm.sh
-./sdkm.sh load all      # optional, images load on first use anyway
 ./sdkm.sh gui orin
 ```
+
+The first launch for each Ubuntu version loads NVIDIA's image and builds the [local image](#local-image), which takes a few minutes and needs internet.
 
 The script temporarily runs `xhost +local:` so the container can draw on your display and revokes it when SDK Manager exits.
 
@@ -129,7 +147,8 @@ You can also use `sdkm.sh` from a WSL2 Ubuntu shell instead of `sdkm.ps1`. For t
 ## Using SDK Manager in the container
 
 - **Logging in:** the container has no web browser, so the **LOGIN** button can't open the NVIDIA login page. Click the **QR code** in the top-right corner of the login box and scan it with your phone to log in instead.
-- **Persistence:** each Ubuntu version gets a docker volume (`sdkm-home-22.04`, etc.) mounted at `/home/nvidia`. Your login, `~/Downloads/nvidia/sdkm_downloads` and `~/nvidia/nvidia_sdk` survive between runs. Use `reset <target>` to wipe it.
+- **Persistence:** each Ubuntu version gets a docker volume (`sdkm-home-22.04`, etc.) mounted at `/home/nvidia`. Your login, `~/Downloads/nvidia/sdkm_downloads` and `~/nvidia/nvidia_sdk` survive between runs. Use `reset <target>` to wipe it. **System packages installed inside a running container do not survive:** the container is deleted when SDK Manager closes. That's why the flash tools are baked into the [local image](#local-image) instead.
+- **Logs:** `./sdkm.sh logs <target>` shows the end of `~/.nvsdkm/sdkm*.log`, which has more detail than the SDK Manager window.
 - **Getting files out:** while the container is running, copy files with `docker cp sdkm-22.04:/home/nvidia/nvidia/nvidia_sdk ./nvidia_sdk`. Or use `shell <target>` and work in the container directly.
 - **Closing:** closing the SDK Manager window stops and removes the container. `docker stop sdkm-22.04` also works.
 - **Console noise:** `Failed to connect to the bus` (dbus) errors in the terminal are harmless and can be ignored.
@@ -138,6 +157,30 @@ You can also use `sdkm.sh` from a WSL2 Ubuntu shell instead of `sdkm.ps1`. For t
   ./sdkm.sh cli orin -- --cli --query interactive
   ```
   which walks you through the options and prints the full unattended install command at the end.
+
+## Local image
+
+On its first install, SDK Manager runs NVIDIA's `Linux_for_Tegra/tools/l4t_flash_prerequisites.sh`, which `apt`-installs the flash tools (`cpp`, `dtc`, the NFS server, QEMU, …). The launchers start containers with `--rm`, so those packages disappear when SDK Manager closes. On the next launch SDK Manager sees JetPack already installed, skips that step, and the flash fails with `Bootrom status check failed` (the log shows `No such file or directory: 'cpp'`).
+
+To fix this, the launchers run a local image, `sdkm-local:<version>-Ubuntu_<xx.04>`, which is NVIDIA's image plus those packages:
+
+- **Built automatically** on first launch, and again whenever NVIDIA's image or `docker/install.sh` changes (tracked with `sdkm.base` / `sdkm.recipe` image labels). Building needs internet access once; `build <target|all>` builds ahead of time.
+- **How it's built:** `docker/install.sh` runs as root in a temporary container of NVIDIA's image, then the result is saved with `docker commit`. The launchers don't use `docker build`, because BuildKit's `docker-container` driver (the default on some Docker Desktop setups) can't see locally loaded images, and some Docker Engine installs don't include buildx.
+- **Startup safety net:** before SDK Manager starts, `sdkm-prereqs` checks the installed JetPack's `l4t_flash_prerequisites.sh` for packages the image is missing (newer JetPack releases add some) and installs them for that session. It learns the package list by running NVIDIA's script with stand-in `sudo`/`apt-get` commands that only record what it asks for. When nothing is missing this takes about a second. If it installs something, bump `# sdkm.recipe:` in `docker/install.sh` and add the package there so it's baked in next time.
+
+## Troubleshooting
+
+SDK Manager's error messages often point at the wrong thing. Check `./sdkm.sh logs <target>` and match the log, not the window:
+
+| You see | Actual cause | Fix |
+| --- | --- | --- |
+| `Bootrom status check failed` / `Reading board information failed`, and the log has `No such file or directory: 'cpp'` | Flash tools missing from the container | Use the local image (default); run `doctor` to confirm the flash tools are found |
+| `failed to read rcm_state` just before one of the errors above | A side effect of the crash that follows it | Fix the error that comes after it |
+| `chroot: failed to run command 'dpkg': Exec format error` | No arm64 emulation on the host | `./sdkm.sh host-setup` |
+| `no support in current kernel` near NFS messages | `nfsd` module not loaded on the host | `./sdkm.sh host-setup` |
+| Detects the board, then hangs at "Waiting for target to boot-up" or can't connect | Host NetworkManager took over the Jetson's USB network, or a firewall blocks it | `./sdkm.sh host-setup`; also check `sudo ufw status` |
+| `unexpected EOF` when loading images | Git LFS pointer files instead of images | See [Cloning](#committing-to-git) |
+| `Return value 8` on a Jetson Nano over usbipd (Windows) | USB reconnect too slow through usbipd | See Known limitations |
 
 ## How it works
 
@@ -158,6 +201,8 @@ Also, in GUI mode `sdkmanager` starts the Electron window as a detached child an
 
 - **Flashing from Windows is not officially supported by NVIDIA.** It goes through usbipd + WSL2 and generally works, but it's less reliable than a native Linux host. If a flash keeps failing at "waiting for target to boot up" or the post-flash SDK component install can't reach `192.168.55.1`, the WSL2 kernel may be missing the USB networking drivers (`rndis_host` / `cdc_ncm`). In that case, flash from a Linux machine with `sdkm.sh`, or finish the component install over Ethernet by entering the Jetson's LAN IP in SDK Manager.
 - **Jetson Nano / TX1 / TX2 (JetPack 4) usually fail to flash through usbipd** with `Error: Return value 8` / `Reading board information failed` right after `tegrarcm --oem platformdetails eeprom`. The board re-enumerates on USB after the recovery applet loads, and usbipd takes a few seconds to re-attach it (visible in `dmesg` as `USB disconnect` followed by `Device attached` ~4 s later). `tegrarcm` times out first. Workarounds: for a Nano Developer Kit with a microSD slot, write NVIDIA's SD card image with Balena Etcher instead of flashing, and use SDK Manager only for SDK components (uncheck Jetson Linux). For eMMC modules, flash from a native Linux host with `sdkm.sh`.
+- **The full initrd/NFS flash (JetPack 6 and 7) hasn't yet been verified end to end in the container.** The pieces it needs are in place: `service nfs-kernel-server`, `rpcbind` and `exportfs` come from the local image, `--privileged` lets the NFS init script mount `/proc/fs/nfsd`, and `--network host` puts the server on the Jetson's USB network. There's no `udevd` in the container either; the flash script appears to only read device attributes with `udevadm info`, which should work without it. If a flash fails at this stage, include `./sdkm.sh logs <target> 300` when reporting it.
+- **Side effect on the host kernel:** because the container is `--privileged`, installing or reconfiguring `binfmt-support` / `qemu-user-static` inside it (e.g. by `l4t_flash_prerequisites.sh`) can register binfmt handlers in the *host* kernel. That's harmless for flashing, but it means `/proc/sys/fs/binfmt_misc` on the host may change after running SDK Manager.
 - Only x86_64 hosts are supported (the images are amd64).
 - The GUI uses software rendering, so it can be slow to redraw. This doesn't affect downloads or flashing.
 

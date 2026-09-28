@@ -1,0 +1,6 @@
+# From NVIDIA Linux_for_Tegra/tools/kernel_flash/host_udev. During an initrd
+# flash the Jetson appears as USB device 0955:7035 with a network interface;
+# keep NetworkManager from reconfiguring it so the flash can reach the board.
+# Installed on the host by `./sdkm.sh host-setup` because the copy the flash
+# script installs inside the container is never seen by the host's udev.
+SUBSYSTEM=="net", ACTION=="add|move", ATTRS{idVendor}=="0955", ATTRS{idProduct}=="7035", ENV{NM_UNMANAGED}="1"

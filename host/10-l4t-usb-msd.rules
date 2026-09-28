@@ -1,0 +1,5 @@
+# From NVIDIA Linux_for_Tegra/tools/kernel_flash/host_udev. During an initrd
+# flash the Jetson (0955:7035) exposes its storage over USB; keep the desktop
+# from automounting it while the flash writes to it.
+# Installed on the host by `./sdkm.sh host-setup`.
+SUBSYSTEM=="block", SUBSYSTEMS=="usb", ATTRS{idVendor}=="0955", ATTRS{idProduct}=="7035", ENV{UDISKS_IGNORE}="1", ENV{UDISKS_PRESENTATION_HIDE}="1"

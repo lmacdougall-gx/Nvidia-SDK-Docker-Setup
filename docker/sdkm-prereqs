@@ -1,0 +1,83 @@
+#!/bin/bash
+# Safety net run before SDK Manager starts: make sure every package that the
+# installed JetPack's l4t_flash_prerequisites.sh asks for is present. The
+# Dockerfile already bakes in the known list; this catches packages that newer
+# JetPack releases add.
+#
+# The script's format changes between releases, so instead of parsing it we run
+# it with stand-in sudo/apt-get/apt commands that only record the packages it
+# asks to install. Nothing is installed by that dry run.
+shopt -s nullglob
+
+scripts=("$HOME"/nvidia/nvidia_sdk/*/Linux_for_Tegra/tools/l4t_flash_prerequisites.sh)
+[ ${#scripts[@]} -gt 0 ] || exit 0
+
+shim="$(mktemp -d)"
+trap 'rm -rf "$shim"' EXIT
+pkglog="$shim/packages"
+touch "$pkglog"
+
+cat > "$shim/apt-get" <<'EOF'
+#!/bin/bash
+# Record the package names given to "install"; ignore everything else.
+sub=""
+for a in "$@"; do
+	case "$a" in
+		-*) ;;
+		*=*) ;;
+		*) if [ -z "$sub" ]; then sub="$a"; elif [ "$sub" = install ]; then echo "$a" >> "$SDKM_PKG_LOG"; fi ;;
+	esac
+done
+exit 0
+EOF
+cp "$shim/apt-get" "$shim/apt"
+
+cat > "$shim/sudo" <<'EOF'
+#!/bin/bash
+# Drop sudo's own options and VAR=value assignments, then run the command.
+while [ $# -gt 0 ]; do
+	case "$1" in -*|*=*) shift ;; *) break ;; esac
+done
+exec "$@"
+EOF
+
+cat > "$shim/id" <<'EOF'
+#!/bin/bash
+# Pretend to be root so scripts that check for it keep going.
+[ "$1" = -u ] && { echo 0; exit 0; }
+exec /usr/bin/id "$@"
+EOF
+chmod +x "$shim"/*
+
+for s in "${scripts[@]}"; do
+	( cd "$(dirname "$s")/.." && PATH="$shim:$PATH" SDKM_PKG_LOG="$pkglog" \
+		timeout 60 bash "$s" ) </dev/null >/dev/null 2>&1
+done
+
+mapfile -t wanted < <(sort -u "$pkglog")
+[ ${#wanted[@]} -gt 0 ] || exit 0
+
+missing=()
+for p in "${wanted[@]}"; do
+	dpkg-query -W -f='${Status}' "$p" 2>/dev/null | grep -q 'install ok installed' || missing+=("$p")
+done
+
+if [ ${#missing[@]} -eq 0 ]; then
+	echo "sdkm: flash prerequisites OK (${#wanted[@]} packages)"
+	exit 0
+fi
+
+echo "sdkm: installing missing flash prerequisites: ${missing[*]}"
+export DEBIAN_FRONTEND=noninteractive
+if ! sudo -E apt-get update -qq; then
+	echo "sdkm: warning: apt-get update failed (offline?); flashing may fail" >&2
+	exit 0
+fi
+if ! sudo -E apt-get install -y -qq --no-install-recommends "${missing[@]}" >/dev/null; then
+	# One unavailable name (e.g. a virtual package) fails the whole batch, so retry one by one.
+	for p in "${missing[@]}"; do
+		sudo -E apt-get install -y -qq --no-install-recommends "$p" >/dev/null 2>&1 ||
+			echo "sdkm: warning: could not install '$p'" >&2
+	done
+fi
+exit 0
