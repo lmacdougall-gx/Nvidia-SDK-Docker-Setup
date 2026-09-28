@@ -70,6 +70,11 @@ load_image() {
 	fi
 	tarball="$(find_tarball "$ver")" ||
 		die "no tarball for Ubuntu $ver in $IMAGES_DIR (expected sdkmanager-${SDKM_VERSION}-Ubuntu_${ver}_docker.tar*)"
+	# A clone made without git-lfs contains small pointer files instead of the
+	# images, which docker rejects with an unhelpful "unexpected EOF".
+	if head -c 40 "$tarball" | grep -q '^version https://git-lfs'; then
+		die "$(basename "$tarball") is a Git LFS pointer, not the image. Install git-lfs, then run: git lfs install && git lfs pull"
+	fi
 	echo "Loading $(basename "$tarball") (this takes a minute)..."
 	docker load -i "$tarball"
 }
@@ -123,6 +128,44 @@ setup_display() {
 	fi
 }
 
+# SDK Manager chroots into the Jetson's arm64 root filesystem to install
+# packages. That needs the host kernel to run aarch64 binaries through QEMU,
+# registered with the F (fix-binary) flag so it works inside the container.
+# Without it the install fails with "chroot: failed to run command 'dpkg':
+# Exec format error". Docker Desktop registers this itself.
+check_arm64_emulation() {
+	is_docker_desktop && return 0
+	local entry=/proc/sys/fs/binfmt_misc/qemu-aarch64
+	if [ -r "$entry" ] && grep -q '^enabled' "$entry" && grep -q '^flags:.*F' "$entry"; then
+		return 0
+	fi
+	echo "warning: arm64 emulation (qemu-aarch64 binfmt with the F flag) is not set up on" >&2
+	echo "         this host. Flashing/building the Jetson root filesystem will fail with" >&2
+	echo "         'Exec format error'. Fix on the host:" >&2
+	echo "           sudo apt install qemu-user-static binfmt-support" >&2
+	echo "           sudo systemctl restart systemd-binfmt" >&2
+}
+
+# JetPack 6+ flashes by booting the Jetson from an initrd that mounts its files
+# over NFS from a server SDK Manager starts inside the container. Containers use
+# the host kernel, so the host must have the nfsd module loaded, otherwise the
+# flash fails with "no support in current kernel".
+check_nfs_server() {
+	is_docker_desktop && return 0
+	if ! grep -qw nfsd /proc/filesystems 2>/dev/null; then
+		echo "warning: the host kernel's NFS server (nfsd) is not loaded. Flashing JetPack 6/7" >&2
+		echo "         will fail with 'no support in current kernel'. Fix on the host:" >&2
+		echo "           sudo modprobe nfsd   # if not found: sudo apt install linux-modules-extra-\$(uname -r)" >&2
+		echo "           echo nfsd | sudo tee /etc/modules-load.d/nfsd.conf   # load at every boot" >&2
+		echo "         Then restart this container." >&2
+	fi
+	if command -v systemctl >/dev/null 2>&1 && systemctl is-active --quiet nfs-kernel-server 2>/dev/null; then
+		echo "warning: nfs-kernel-server is running on the host and will conflict with the" >&2
+		echo "         container's NFS server while flashing. Stop it first:" >&2
+		echo "           sudo systemctl stop nfs-kernel-server" >&2
+	fi
+}
+
 revoke_display() {
 	if [ "$XHOST_GRANTED" = 1 ]; then xhost -local: >/dev/null 2>&1 || true; fi
 }
@@ -139,6 +182,8 @@ run_container() {
 
 	load_image "$ver"
 	setup_display "$mode"
+	check_arm64_emulation
+	check_nfs_server
 	trap revoke_display EXIT
 
 	# --privileged + /dev: flashing uses loop devices and the Jetson re-enumerates

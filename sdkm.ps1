@@ -70,6 +70,11 @@ function Import-SdkmImage([string] $v) {
     if (-not $tarball) {
         throw "no tarball for Ubuntu $v in $ImagesDir (expected sdkmanager-$SdkmVersion-Ubuntu_${v}_docker.tar*)"
     }
+    # A clone made without git-lfs contains small pointer files instead of the
+    # images, which docker rejects with an unhelpful "unexpected EOF".
+    if ($tarball.Length -lt 1024 -and (Get-Content $tarball.FullName -TotalCount 1) -like 'version https://git-lfs*') {
+        throw "$($tarball.Name) is a Git LFS pointer, not the image. Install Git LFS, then run: git lfs install; git lfs pull"
+    }
     Write-Host "Loading $($tarball.Name) (this takes a minute)..."
     docker load -i $tarball.FullName
     if ($LASTEXITCODE -ne 0) { throw "docker load failed" }

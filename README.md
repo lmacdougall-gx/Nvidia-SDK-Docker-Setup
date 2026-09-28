@@ -58,7 +58,20 @@ Requirements: an x86_64 Linux machine with a desktop session (X11 or Wayland wit
 ```bash
 sudo apt install docker.io x11-xserver-utils   # or install Docker Engine from docs.docker.com
 sudo usermod -aG docker $USER                   # then log out and back in
+sudo apt install qemu-user-static binfmt-support  # arm64 emulation, see below
 ```
+
+**arm64 emulation:** while building the Jetson's root filesystem, SDK Manager `chroot`s into it and runs arm64 programs such as `dpkg`. The host kernel must be able to run them through QEMU, and the registration needs the `F` flag so it works inside the container. `cat /proc/sys/fs/binfmt_misc/qemu-aarch64` should show `enabled` and `F` in its `flags:` line. If it doesn't, run `sudo systemctl restart systemd-binfmt`. Without this, the "File System and OS" step fails with `chroot: failed to run command 'dpkg': Exec format error`. `sdkm.sh` warns at startup if it's missing.
+
+**NFS server module (JetPack 6 and 7):** these releases flash by booting the Jetson from a temporary image that loads its files over NFS. The NFS server runs inside the container, but it uses the host kernel's `nfsd` module, so load it on the host:
+
+```bash
+sudo modprobe nfsd                                   # if "not found": sudo apt install linux-modules-extra-$(uname -r)
+echo nfsd | sudo tee /etc/modules-load.d/nfsd.conf   # load it at every boot
+grep nfsd /proc/filesystems                          # should print "nodev nfsd"
+```
+
+You don't need to run an NFS server on the host. If `nfs-kernel-server` is running on the host for something else, stop it while flashing (`sudo systemctl stop nfs-kernel-server`), since it conflicts with the container's server. Without `nfsd`, the flash fails with `no support in current kernel`. `sdkm.sh` warns about both at startup. If you load the module while SDK Manager is open, close it and start it again.
 
 Then from the repo:
 
@@ -157,3 +170,5 @@ Also, in GUI mode `sdkmanager` starts the Electron window as a detached child an
 ## Committing to git
 
 The image tarballs are ~500 MB each, so `.gitattributes` stores `images/*.tar*` with Git LFS. Run `git lfs install` once before the first `git add`.
+
+**Cloning:** install Git LFS *before* cloning (`sudo apt install git-lfs` on Ubuntu, included with Git for Windows) and run `git lfs install` once. Otherwise `images/` contains ~130-byte pointer files instead of the images, and `docker load` fails with `unexpected EOF`. The scripts detect this and tell you. To fix an existing clone, run `git lfs install && git lfs pull`, then check with `git lfs fsck`.
