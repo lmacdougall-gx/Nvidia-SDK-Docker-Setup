@@ -179,6 +179,7 @@ SDK Manager's error messages often point at the wrong thing. Check `./sdkm.sh lo
 | `chroot: failed to run command 'dpkg': Exec format error` | No arm64 emulation on the host | `./sdkm.sh host-setup` |
 | `no support in current kernel` near NFS messages | `nfsd` module not loaded on the host | `./sdkm.sh host-setup` |
 | Detects the board, then hangs at "Waiting for target to boot-up" or can't connect | Host NetworkManager took over the Jetson's USB network, or a firewall blocks it | `./sdkm.sh host-setup`; also check `sudo ufw status` |
+| No GUI window, with `Authorization required` / `cannot open display` (seen with the 24.04 image) | In the 24.04 image the container user is UID 1001 (the base image already has an `ubuntu` user at 1000), so it couldn't read your X login cookie | Fixed in `sdkm.sh`: the cookie is now copied for the container user at startup. If it still fails, install `x11-xserver-utils` so the script can also run `xhost +local:` |
 | `unexpected EOF` when loading images | Git LFS pointer files instead of images | See [Cloning](#committing-to-git) |
 | `Return value 8` on a Jetson Nano over usbipd (Windows) | USB reconnect too slow through usbipd | See Known limitations |
 

@@ -193,7 +193,12 @@ setup_display() {
 	fi
 	DISPLAY_ARGS=(-e "DISPLAY=$DISPLAY" -v /tmp/.X11-unix:/tmp/.X11-unix)
 	if [ -n "${XAUTHORITY:-}" ] && [ -f "$XAUTHORITY" ]; then
-		DISPLAY_ARGS+=(-e XAUTHORITY=/tmp/.Xauthority -v "$XAUTHORITY:/tmp/.Xauthority:ro")
+		# The X cookie file is readable only by its owner (the desktop user, usually
+		# UID 1000), but the container's nvidia user isn't always that UID: in the
+		# 24.04 image it's 1001 because the base image already has an `ubuntu` user
+		# at 1000. So mount it read-only elsewhere; XAUTH_FIX copies it for nvidia.
+		DISPLAY_ARGS+=(-e XAUTHORITY=/tmp/.Xauthority -e SDKM_HOST_XAUTH=/tmp/.host-Xauthority
+			-v "$XAUTHORITY:/tmp/.host-Xauthority:ro")
 	fi
 	# Allow local (non-network) clients such as the container to connect.
 	if ! is_wsl && command -v xhost >/dev/null 2>&1; then
@@ -382,11 +387,15 @@ cmd_logs() {
 # Before SDK Manager starts, sdkm-prereqs (baked into the local image) installs
 # any flash prerequisite the installed JetPack asks for that the image lacks.
 PREREQS='command -v sdkm-prereqs >/dev/null && sdkm-prereqs'
+# Root in the container can read the host's X cookie whatever its owner; give
+# the container user its own copy (see setup_display).
+XAUTH_FIX='[ -n "${SDKM_HOST_XAUTH:-}" ] && sudo install -o "$(id -u)" -m 600 "$SDKM_HOST_XAUTH" "$XAUTHORITY"'
 # `sdkmanager` (GUI mode) launches the Electron window as a detached child and
 # exits immediately, which would stop the container. Piping through `cat` keeps
 # the container alive until the GUI closes its stdout, i.e. the window closes.
-GUI_WRAPPER="$PREREQS; sdkmanager \"\$@\" | cat"
-CLI_WRAPPER="$PREREQS; exec sdkmanager \"\$@\""
+GUI_WRAPPER="$XAUTH_FIX; $PREREQS; sdkmanager \"\$@\" | cat"
+CLI_WRAPPER="$XAUTH_FIX; $PREREQS; exec sdkmanager \"\$@\""
+SHELL_WRAPPER="$XAUTH_FIX; exec bash \"\$@\""
 
 run_container() {
 	local mode="$1" ver="$2" entrypoint="$3"; shift 3
@@ -438,7 +447,7 @@ main() {
 				gui)   run_container gui "$ver" bash -c "$GUI_WRAPPER" gui "$@" ;;
 				cli)   [ $# -gt 0 ] || set -- --cli --help
 				       run_container cli "$ver" bash -c "$CLI_WRAPPER" cli "$@" ;;
-				shell) run_container shell "$ver" bash "$@" ;;
+				shell) run_container shell "$ver" bash -c "$SHELL_WRAPPER" shell "$@" ;;
 			esac ;;
 		logs)   cmd_logs "$(resolve_target "${1:-}")" "${2:-100}" ;;
 		doctor) cmd_doctor "$(resolve_target "${1:-}")" ;;
