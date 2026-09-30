@@ -13,15 +13,21 @@
 # default on some Docker Desktop setups) can't see locally loaded images.
 #
 # Bump this whenever this file or sdkm-prereqs changes so local images rebuild:
-# sdkm.recipe: 1
+# sdkm.recipe: 2
 set -euo pipefail
 here="$(cd "$(dirname "$0")" && pwd)"
 
 . /etc/os-release
 case "$VERSION_ID" in
 	18.04) extra="liblz4-tool python vim-common" ;;
+	24.04) extra="lz4 python-is-python3 xxd libasound2t64" ;;
 	*)     extra="lz4 python-is-python3 xxd" ;;
 esac
+# 24.04: NVIDIA's image satisfies sdkmanager's libasound2 dependency with
+# liboss4-salsa-asound2, an OSS4 stand-in for ALSA that lacks symbols Electron
+# needs, so the GUI dies before opening a window ("undefined symbol:
+# snd_device_name_get_hint"). Installing the real ALSA library (libasound2t64,
+# renamed in 24.04 by the 64-bit time_t transition) replaces it.
 
 apt-get update
 # shellcheck disable=SC2086
